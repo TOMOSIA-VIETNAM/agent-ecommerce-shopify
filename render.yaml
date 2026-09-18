@@ -39,6 +39,7 @@ services:
       - key: REDIS_URL
         fromService:
           name: shopping-agent-redis
+          type: keyvalue
           property: connectionString
 
   - name: shopping-agent-redis
@@ -79,6 +80,7 @@ services:
       - key: REDIS_URL
         fromService:
           name: merchant-agent-redis
+          type: keyvalue
           property: connectionString
 
   - name: merchant-agent-redis
