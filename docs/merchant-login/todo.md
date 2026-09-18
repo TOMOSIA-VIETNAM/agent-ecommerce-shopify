@@ -1,0 +1,471 @@
+# Todo: Merchant Login
+
+See `plan.md` for full context and architecture
+decisions, `spec.md` for the full spec.
+
+### Phase 1: Database Foundation
+
+- [x] Task 1.1: Add Prisma/bcrypt dependencies, root docker-compose, env vars
+  - **Description:** Install the three new npm packages, add a root-level
+    `docker-compose.yml` (separate compose project from
+    `shopping-agent/docker-compose.yml`), and add `DATABASE_URL` to
+    `.env`/`.env.example`. No application code changes — this only makes the
+    tooling available.
+  - **Acceptance criteria:**
+    - [x] `bcrypt`, `@types/bcrypt`, `prisma`, `@prisma/client` appear in
+          `package.json`/`package-lock.json` (via `npm install`).
+    - [x] `docker-compose.yml` at repo root defines one `postgres` service
+          (`postgres:16-alpine`), a named volume, port 5432 published — does
+          not modify `shopping-agent/docker-compose.yml`.
+    - [x] `.env.example` gains
+          `DATABASE_URL="postgresql://postgres:postgres@localhost:5432/tomosia_merchant"`;
+          local `.env` gets a working value (not committed).
+  - **Verification:**
+    - [x] `npm install bcrypt @types/bcrypt prisma @prisma/client` completes
+          without native-build errors (see plan's bcrypt risk). Confirmed
+          bcrypt's native binding actually loads (hash+compare round trip),
+          not just that install exited 0.
+    - [x] `docker compose up -d postgres` starts a healthy container;
+          `docker compose ps` shows it distinct from any `shopping-agent`
+          compose project (`tomosia-commerce-postgres-1`, default project
+          name, no collision).
+    - [x] `npm run build` still succeeds (nothing wired yet — sanity check).
+  - **Dependencies:** None
+  - **Files:**
+    - `package.json` (`package-lock.json` is gitignored in this repo —
+      pre-existing, not touched)
+    - `docker-compose.yml` (new)
+    - `.env`, `.env.example`
+  - **Estimated scope:** Small (1-2 meaningful files; lockfile is generated)
+  - **Notes:** npm's `prisma` "latest" dist-tag resolved to an `8.0.0-rc`
+    prerelease while `@prisma/client` resolved to stable `7.10.0` — pinned
+    `prisma` to `7.10.0` explicitly so CLI and client match. Also reverted
+    two unrelated sitemap build artifacts (`public/sitemap.xml`,
+    `public/sitemap-0.xml`) that `npm run build`'s `next-sitemap` postbuild
+    step regenerated as a side effect — out of scope for this task.
+
+- [x] Task 1.2: Prisma schema + initial migration
+  - **Description:** Define `MerchantUser` and `MerchantSession` models
+    exactly as specified (single role, no permissions field) and run the
+    first migration against the local Postgres container.
+  - **Acceptance criteria:**
+    - [x] `prisma/schema.prisma` has `MerchantUser { id, email (unique),
+          passwordHash, name, createdAt }` and `MerchantSession { id (opaque
+          token, PK), userId → MerchantUser, expiresAt, createdAt }`.
+    - [x] `npx prisma migrate dev` runs cleanly against a fresh database and
+          creates both tables.
+    - [x] Prisma's generated client lands in its default location
+          (`node_modules/@prisma/client`) — no custom `output` path, so no
+          new `.gitignore` entry needed.
+  - **Verification:**
+    - [x] `docker compose up -d postgres && npx prisma migrate dev` — schema
+          applies cleanly to a fresh DB (spec step 2).
+    - [x] Inspected via `psql` that both tables and the FK/unique
+          constraints exist (`MerchantUser_email_key` UNIQUE,
+          `MerchantSession_userId_fkey` FK ON DELETE CASCADE, index on
+          `userId`).
+  - **Dependencies:** Task 1.1
+  - **Files:**
+    - `prisma/schema.prisma` (new)
+    - `prisma/migrations/**` (generated)
+    - `package.json` (prisma/@prisma/client version pin, see Notes)
+  - **Estimated scope:** Small
+  - **Notes:** Prisma 7.x (installed in Task 1.1) rejects the classic
+    `datasource { url = env(...) }` form at the CLI — it now requires a
+    driver-adapter package (`@prisma/adapter-pg` + `pg`) and a
+    `prisma.config.ts`, a real architecture change the spec didn't
+    anticipate. Downgraded `prisma`/`@prisma/client` to `6.19.3` (latest
+    stable still on the schema-url model) instead of adding the new adapter
+    dependency — stays within the spec's approved dependency list.
+
+- [x] Task 1.3: `create-merchant-account.mjs` script
+  - **Description:** The only way accounts get created — a standalone Node
+    ESM script that hashes the password with bcrypt (cost 12) and inserts a
+    `MerchantUser` row via its own `PrismaClient` instance.
+  - **Acceptance criteria:**
+    - [x] `node scripts/create-merchant-account.mjs <email> <password>
+          <name>` creates a row with a bcrypt hash (never the plaintext)
+          stored.
+    - [x] Running it a second time with the same email fails on the unique
+          constraint with a readable error, rather than silently duplicating
+          or crashing unhelpfully.
+  - **Verification:**
+    - [x] `node scripts/create-merchant-account.mjs owner@tomosia.test
+          hunter2 "Store Owner"` creates the row (spec step 3); re-running
+          with the same email fails as expected (`P2002` caught, clean exit
+          1 message).
+    - [x] Confirmed in the DB via `psql`: `passwordHash` is a `$2b$12$...`
+          bcrypt hash, not the literal password.
+  - **Dependencies:** Task 1.2
+  - **Files:**
+    - `scripts/create-merchant-account.mjs` (new)
+  - **Estimated scope:** Small
+
+### Checkpoint: Phase 1 complete
+- [x] `docker compose up -d postgres` + `npx prisma migrate dev` reproducible
+      from a clean clone.
+- [x] One seeded merchant account exists (`owner@tomosia.test`).
+- [x] `npm run lint` / `npm run build` still clean — zero application
+      behavior changed yet; this phase is purely infrastructure.
+
+---
+
+### Phase 2: Auth Core Library
+
+- [x] Task 2.1: Prisma client singleton
+  - **Description:** `src/lib/merchant/db.ts` — the standard Next.js
+    `globalThis`-cached `PrismaClient` singleton, so dev's hot reload doesn't
+    open a new connection pool per file edit.
+  - **Acceptance criteria:**
+    - [x] Exports a single `prisma` instance.
+    - [x] In dev (`NODE_ENV !== "production"`), the instance is cached on
+          `globalThis` so repeated hot-reloads reuse it.
+  - **Verification:**
+    - [x] Functionally verified via a throwaway script (same logic, run
+          outside the TS module graph since no TS-loader is installed):
+          repeated calls return the same instance, and a real query against
+          the merchant DB succeeds. `npm run dev` hot-reload spot-check
+          deferred — not worth a manual dev-server session for logic already
+          proven correct.
+  - **Dependencies:** Task 1.2
+  - **Files:**
+    - `src/lib/merchant/db.ts` (new)
+  - **Estimated scope:** XS
+
+- [x] Task 2.2: Auth logic + self-check
+  - **Description:** `src/lib/merchant/auth.ts`, the single source of truth
+    for merchant auth logic. Also add the one required self-check script
+    (`scripts/test-merchant-auth.mjs`) covering the two pieces of
+    non-trivial logic: hash/verify round-trip and session-expiry rejection.
+  - **Acceptance criteria:**
+    - [x] `hashPassword`/`verifyPassword` use bcrypt at cost 12.
+    - [x] `createSession(userId)` writes a `MerchantSession` row with
+          `expiresAt = now + MERCHANT_SESSION_TTL_MS` and returns the opaque
+          token.
+    - [x] `getSessionUser(token)` returns `null` for a missing/unknown token
+          **and** for a session whose `expiresAt` is in the past.
+    - [x] `deleteSession(token)` removes the row if present, no-ops
+          otherwise (`deleteMany`, not `delete`).
+    - [x] `scripts/test-merchant-auth.mjs` is an `assert`-based script, no
+          framework, that fails loudly if `verifyPassword` returns true for
+          a wrong password or if `getSessionUser` accepts an expired
+          session.
+  - **Verification:**
+    - [x] `node scripts/test-merchant-auth.mjs` exits 0.
+    - [x] Sanity-checked the self-check isn't vacuous: temporarily inverted
+          the expiry comparison, confirmed the script fails loudly with a
+          clear assertion message, and that `finally` cleanup still runs on
+          failure (no orphaned test rows left in the DB).
+    - [x] `npm run lint` clean on both new files.
+    - [x] Confirmed via a deliberately-injected type error that `npm run
+          build` type-checks `auth.ts` even though nothing imports it yet
+          (standalone `tsc --noEmit` hits this repo's pre-existing,
+          unrelated tsconfig `baseUrl` deprecation error).
+  - **Dependencies:** Task 2.1
+  - **Files:**
+    - `src/lib/merchant/auth.ts` (new)
+    - `scripts/test-merchant-auth.mjs` (new)
+  - **Estimated scope:** Small
+  - **Note:** the self-check mirrors `auth.ts`'s DB operations rather than
+    importing the module — same Node/path-alias constraint already noted
+    for `create-merchant-account.mjs`. Real end-to-end exercise of the
+    actual exported functions happens starting Phase 3, once API routes
+    call into them.
+
+- [x] Task 2.3: Merchant cookie constants
+  - **Description:** Add `MERCHANT_AUTH_COOKIE`, `MERCHANT_AUTH_COOKIE_OPTIONS`
+    (`path: "/merchant"`, not `"/"`), and `MERCHANT_SESSION_TTL_MS` to
+    `src/lib/constants.ts`, alongside (not replacing) the existing
+    `AUTH_COOKIE`/`AUTH_COOKIE_OPTIONS`.
+  - **Acceptance criteria:**
+    - [x] New constants added without modifying `AUTH_COOKIE`/
+          `AUTH_COOKIE_OPTIONS`.
+    - [x] `MERCHANT_AUTH_COOKIE_OPTIONS.path === "/merchant"`.
+  - **Verification:**
+    - [x] `npm run build` clean; diff confirms `AUTH_COOKIE`/
+          `AUTH_COOKIE_OPTIONS` untouched (purely additive diff).
+  - **Dependencies:** None (can run in parallel with 2.1/2.2)
+  - **Files:**
+    - `src/lib/constants.ts`
+  - **Estimated scope:** XS
+  - **Note:** done ahead of Task 2.2 in execution order (not the order
+    listed) — `createSession` in Task 2.2 needs `MERCHANT_SESSION_TTL_MS` to
+    compile, a real dependency the plan's "no dependency" note undersold.
+
+### Checkpoint: Phase 2 complete
+- [x] `node scripts/test-merchant-auth.mjs` passes.
+- [x] `npm run lint` && `npm run build` clean.
+- [x] Still zero user-facing behavior change — `/merchant` remains open
+      exactly as before (nothing imports `auth.ts`/`db.ts`/the new
+      constants yet).
+
+---
+
+### Phase 3: Route Gating & Login Flow
+
+- [x] Task 3.1: Middleware fast-path + login page stub
+  - **Description:** Add `src/middleware.ts` (matcher `["/merchant/:path*"]`)
+    that redirects any `/merchant/*` request lacking `MERCHANT_AUTH_COOKIE`
+    to `/merchant/login?next=<path>`, except `/merchant/login` itself, which
+    it lets through unconditionally. Add a bare-bones stub at
+    `src/app/(merchant)/merchant/login/page.tsx` (no real form yet) so the
+    redirect target renders instead of 404ing.
+  - **⚠️ Interim state, not the real gate:** after this task the middleware
+    only checks cookie *presence*, not validity, and the existing
+    `merchant/page.tsx` is still directly reachable once any cookie exists.
+    This is closed by Task 3.2 in the same phase, before the Phase 3
+    checkpoint — don't treat this task alone as "login is secure."
+  - **Acceptance criteria:**
+    - [x] Logged-out visit to `/merchant` (no cookie, zero path segments)
+          redirects to `/merchant/login`.
+    - [x] Logged-out visit to `/merchant/orders` redirects to
+          `/merchant/login?next=%2Fmerchant%2Forders`.
+    - [x] `/merchant/login` itself renders (stub content is fine) with no
+          redirect loop, cookie or not.
+    - [x] `next` is validated as a same-origin relative path
+          (`next.startsWith("/") && !next.startsWith("//")`) before being
+          used in the redirect.
+    - [x] Middleware does not import anything from `src/lib/merchant/db.ts`
+          or `auth.ts` — cookie check only.
+  - **Verification:**
+    - [x] Manual against a real `next start` server (not just the build):
+          `/merchant` and `/merchant/orders` without a cookie both 307 to
+          the right `?next=` target; `/merchant/login` is 200 with no
+          redirect, with or without a cookie; a request WITH the cookie
+          passes straight through (200 on `/merchant`).
+    - [x] `npm run build` succeeds — output shows "ƒ Proxy (Middleware)",
+          confirming it compiled for the Edge runtime.
+  - **Dependencies:** Task 2.3
+  - **Files:**
+    - `src/middleware.ts` (new)
+    - `src/app/(merchant)/merchant/login/page.tsx` (new, stub)
+  - **Estimated scope:** Small
+  - **Note:** `/merchant/orders` isn't an actual route (the portal's four
+    views are client-side state under the single `/merchant` page) — with
+    the cookie present it 404s, which is Next's normal routing for a
+    nonexistent path, not a middleware defect. The middleware gates by path
+    prefix regardless of whether a concrete page exists underneath.
+
+- [x] Task 3.2: Real session gate — move portal into `(dashboard)` group
+  - **Description:** Create
+    `src/app/(merchant)/merchant/(dashboard)/layout.tsx`, a server component
+    that reads `MERCHANT_AUTH_COOKIE` via `cookies()`, calls
+    `getSessionUser(token)`, and `redirect("/merchant/login?next=" +
+    currentPath)` on any missing/invalid/expired session. Move today's
+    `src/app/(merchant)/merchant/page.tsx` client-component body into
+    `src/layouts/merchant/shell/PortalApp.tsx` unchanged, and replace
+    `merchant/page.tsx` with a new thin server component at
+    `(dashboard)/page.tsx` that reads the now-validated session user and
+    renders `PortalApp` with `operator={{ name: user.name, role:
+    "Merchant" }}` — **update both hardcoded `"Jordan"` sites**: the
+    `PortalShell` `operator` prop and the separate `HomeView
+    operator="Jordan"` prop.
+  - **Acceptance criteria:**
+    - [x] `/merchant` with a missing/invalid/expired cookie redirects to
+          `/merchant/login?next=%2Fmerchant`; this closes the gap left open
+          by Task 3.1.
+    - [x] `/merchant` with a valid session renders the portal with the real
+          user's name in both the `PortalShell` operator block and the
+          `HomeView` welcome text — no remaining literal `"Jordan"` anywhere
+          in the moved code.
+    - [x] `PortalApp.tsx` content is otherwise byte-identical to today's
+          `page.tsx` body (a move, not a rewrite) — diffed: exactly 3 lines
+          differ, all the operator prop wiring.
+    - [x] No database call happens inside `src/middleware.ts`.
+  - **Verification:**
+    - [x] Against a real `next start` server: issued a real session for the
+          seeded `owner@tomosia.test` (via a throwaway script, not
+          committed) — `/merchant` renders 200 with "Store Owner" in the
+          HTML, zero occurrences of "Jordan".
+    - [x] A cookie with a bogus/unknown token (passes middleware's presence
+          check) is correctly rejected here — 307 to login.
+    - [x] Expired that same session's `expiresAt` in the DB directly via
+          `psql` and re-requested — 307 to login again, identical to a
+          missing session.
+    - [x] `npm run lint` && `npm run build` clean.
+  - **Dependencies:** Task 3.1, Task 2.2
+  - **Files:**
+    - `src/app/(merchant)/merchant/(dashboard)/layout.tsx` (new)
+    - `src/app/(merchant)/merchant/(dashboard)/page.tsx` (new, thin server
+      component)
+    - `src/layouts/merchant/shell/PortalApp.tsx` (new, moved from old
+      `merchant/page.tsx`)
+    - `src/app/(merchant)/merchant/page.tsx` (deleted — content moved)
+  - **Estimated scope:** Medium
+
+- [x] Task 3.3: Login API route + real login form
+  - **Description:** Build `POST /api/merchant/login` following the exact
+    shape in the spec's Code Style section (thin handler, generic 401 for
+    both unknown-email and wrong-password, no enumeration), and replace the
+    Task 3.1 stub with the real login form: email/password fields, reads
+    `?next=`, submits to the API, redirects to `next` (validated) or
+    `/merchant` on success, shows one generic inline error on failure.
+  - **Acceptance criteria:**
+    - [x] Correct credentials → `MerchantSession` row created,
+          `MERCHANT_AUTH_COOKIE` set with `MERCHANT_AUTH_COOKIE_OPTIONS`,
+          redirect lands on exactly the `next` path (or `/merchant` if
+          none/invalid).
+    - [x] Wrong password, and unknown email, both return the same generic
+          error message and HTTP status; confirmed in the DB that no
+          `MerchantSession` row is created in either case.
+    - [x] `next` validated as a same-origin relative path on the client
+          before it's ever used in a redirect.
+    - [x] Login page visually uses `merchant.css` tokens (`bg-(--card)`,
+          `text-(--ink)`, etc.), not storefront styling.
+    - [x] A logged-in visit to `/merchant/login` still renders (no forced
+          redirect away) — per spec's explicit success criterion.
+  - **Verification:**
+    - [x] Against a real `next start` server: wrong password and unknown
+          email both return the identical 401 error, no session row
+          created either time (`SELECT count(*)` = 0).
+    - [x] Correct credentials → cookie set (`path=/merchant`), session row
+          created, following the cookie to `/merchant` renders the portal;
+          cookie confirmed absent on a request to `/` (path scoping).
+    - [x] Full flow re-verified through a real Chrome browser
+          (chrome-devtools MCP), not curl: logged out on `/merchant` →
+          redirected to `/merchant/login?next=%2Fmerchant` → wrong password
+          shows one inline alert, form re-enables → correct password →
+          lands on exactly `/merchant` with "Store Owner" in the operator
+          block and the Home view greeting. Zero console errors.
+    - [x] `npm run lint` && `npm run build` clean.
+  - **Dependencies:** Task 3.2, Task 2.2, Task 1.3
+  - **Files:**
+    - `src/app/api/merchant/login/route.ts` (new — **relocated in Task 4.1**
+      to `src/app/(merchant)/merchant/api/login/route.ts` after a cookie-path
+      bug was found; see that task's note)
+    - `src/app/(merchant)/merchant/login/page.tsx` (now reads `searchParams`
+      and renders the form)
+    - `src/layouts/merchant/shell/MerchantLoginForm.tsx` (new — the
+      interactive client piece, split out so the page itself can stay a
+      server component reading `searchParams` the same way the rest of the
+      repo does)
+  - **Estimated scope:** Medium
+
+### Checkpoint: Phase 3 complete — recommended human check-in
+- [x] Full logged-out → login → correct-credentials → portal loop works end
+      to end against the seeded account (verified via a real browser).
+- [x] Wrong-credentials path verified to create no session row.
+- [x] `npm run lint` && `npm run build` clean.
+- [x] This is the first checkpoint where real auth is enforced — **recommend
+      a human look at this before Phase 4** (logout/UI wiring): review
+      `src/middleware.ts`, `(dashboard)/layout.tsx`, and
+      `api/merchant/login/route.ts` for the open-redirect guard and
+      generic-error behavior.
+
+---
+
+### Phase 4: Logout + UI Wiring
+
+- [x] Task 4.1: Logout API + "Log out" control in the portal shell
+  - **Description:** `POST /merchant/api/logout` deletes the
+    `MerchantSession` row for the current cookie (if any) and clears the
+    cookie, always succeeding (mirrors `src/app/api/customer/logout/route.ts`).
+    Add a small "Log out" control beside the existing operator block in
+    `PortalShell.tsx` (~lines 135-141), wired through a new `onLogout: () =>
+    void` prop that `PortalApp.tsx` implements as `POST
+    /merchant/api/logout` then redirect to `/merchant/login`.
+  - **Acceptance criteria:**
+    - [x] Clicking "Log out" clears `MERCHANT_AUTH_COOKIE` (DevTools →
+          Application → Cookies) and deletes the corresponding
+          `MerchantSession` row.
+    - [x] After logout, the next visit to `/merchant` (or any dashboard
+          path) redirects to login again — no residual valid state.
+    - [x] Logout API always returns success even if no cookie/session
+          existed.
+    - [x] `PortalShell.tsx`'s existing operator name/role rendering is
+          unchanged in appearance apart from the added control.
+  - **Verification:**
+    - [x] Real Chrome browser: log in, click "Log out" → navigates to
+          `/merchant/login`, zero console messages, `MerchantSession` row
+          count drops to 0 in the DB, `/merchant` redirects to login again.
+    - [x] `npm run lint` && `npm run build` clean.
+  - **Dependencies:** Task 3.3, Task 2.2
+  - **Files:**
+    - `src/app/(merchant)/merchant/api/logout/route.ts` (new)
+    - `src/layouts/merchant/shell/PortalShell.tsx` (modified — add
+      `onLogout` prop + control)
+    - `src/layouts/merchant/shell/PortalApp.tsx` (modified — implement
+      `onLogout`)
+  - **Estimated scope:** Small
+  - **Bug found and fixed during verification (not by inspection):** with
+    the login/logout routes at `src/app/api/merchant/**` (as Task 3.3
+    originally built and this task's description above still describes),
+    the browser correctly refused to send the `path: "/merchant"`-scoped
+    cookie to `/api/merchant/logout` — it doesn't fall under the `/merchant`
+    prefix. Logout looked like it worked (200, cookie cleared client-side)
+    but never deleted the `MerchantSession` row, since the server never saw
+    the token. Fixed by moving both routes to
+    `src/app/(merchant)/merchant/api/{login,logout}/route.ts` (URLs
+    `/merchant/api/login`, `/merchant/api/logout`) so they share the
+    cookie's path scope, and adding both to `middleware.ts`'s `PUBLIC_PATHS`
+    bypass list. `spec.md` amended to match — see its
+    "Amendment" note in Project Structure. Also fixed in the same pass: a
+    real Chrome DevTools issue (missing `name` attributes on
+    `MerchantLoginForm.tsx`'s email/password inputs, found via the
+    browser's Issues panel, not a lint rule).
+  - **Files actually touched** (differs from the list above because of the
+    fix): `src/app/(merchant)/merchant/api/login/route.ts` (moved from
+    `src/app/api/merchant/login/route.ts`), `.../api/logout/route.ts` (new,
+    at the corrected location), `src/middleware.ts` (add `PUBLIC_PATHS`),
+    `MerchantLoginForm.tsx` (fetch URL + `name` attributes), `PortalApp.tsx`
+    (fetch URL), `PortalShell.tsx` (as originally planned).
+
+### Checkpoint: Phase 4 complete
+- [x] Full narrative loop verified: logged-out redirect → login form →
+      correct-credential success → portal with real name → logout →
+      redirected to login again. (Verified through a real Chrome browser
+      end to end, including the DB-level session-row check.)
+- [x] `npm run lint` && `npm run build` clean.
+
+---
+
+### Phase 5: Polish & Full Verification
+
+- [x] Task 5.1: Session-expiry and cross-cookie isolation verification pass
+  - **Description:** No new production code expected (expiry logic already
+    exists from Task 2.2, cookie scoping from Task 2.3) — this task is
+    dedicated to running the spec's remaining, previously-unexercised
+    verification steps and fixing anything they surface.
+  - **Acceptance criteria:**
+    - [x] Manually expiring a `MerchantSession.expiresAt` to the past and
+          reloading `/merchant` redirects to login, identical to a missing
+          session (spec step 8).
+    - [x] The merchant cookie never appears on a storefront request (`/`,
+          `/products/...`) — confirmed at the wire level (`path=/merchant`).
+    - [x] No file under `src/lib/shopify/**`, `src/app/api/customer/**`, or
+          `cartActions.ts` was modified anywhere in this feature (`git diff
+          --stat` against the pre-feature commit is empty for all three).
+    - [x] No npm dependency beyond `bcrypt`, `@types/bcrypt`, `prisma`,
+          `@prisma/client` was added (`git diff package.json` shows exactly
+          these four, nothing else).
+  - **Verification:**
+    - [x] All 10 steps in `spec.md`'s Testing Strategy passed
+          fresh, re-run end to end (self-check script, migration status,
+          duplicate-account rejection, logged-out redirect, wrong password,
+          correct login, logout, session expiry, cookie isolation, lint +
+          build).
+    - [x] `npm run lint` (full repo, not just changed files) && `npm run
+          build` — clean, zero warnings.
+    - [x] `git diff --stat 2a7d8ab..HEAD` (the commit before this feature
+          started) reviewed — all 18 changed files fall inside the spec's
+          approved boundaries, nothing outside.
+  - **Dependencies:** Task 4.1
+  - **Files:** none — pure verification, no defect surfaced requiring a
+    code change.
+  - **Estimated scope:** XS-S (verification; code changes only if a defect
+    surfaces)
+  - **Spec correction found during this pass (not a code bug):** step 9's
+    original wording claimed the customer `token` cookie "never appears on
+    a `/merchant/*` request." That's not achievable at the wire level —
+    `AUTH_COOKIE_OPTIONS.path` is `/`, so browsers attach it to every
+    same-origin request regardless (verified with `curl --cookie
+    "token=..."` against `/merchant/login` — the header is present). What
+    actually holds, and is what matters: grep confirms no file under
+    `src/app/(merchant)/**`, `src/middleware.ts`, or `src/lib/merchant/**`
+    ever reads `AUTH_COOKIE`, and no customer-side file ever reads
+    `MERCHANT_AUTH_COOKIE` — each system reads only its own cookie by name.
+    `spec.md`'s Testing Strategy step 9 corrected to say this.
+
+### Checkpoint: Feature complete
+- [x] All acceptance criteria across Phases 1-5 met.
+- [x] Ready for human review / merge.
