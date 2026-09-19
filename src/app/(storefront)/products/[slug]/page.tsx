@@ -4,8 +4,8 @@ import LoadingProductGallery from "@/components/loadings/skeleton/SkeletonProduc
 import ProductGallery from "@/components/product/ProductGallery";
 import ShowTags from "@/components/product/ShowTags";
 import Tabs from "@/components/product/Tabs";
+import Price from "@/components/Price";
 import { VariantSelector } from "@/components/product/VariantSelector";
-import config from "@/config/config.json";
 import { getListPage } from "@/lib/contentParser";
 import { getProduct, getProductRecommendations } from "@/lib/shopify";
 import LatestProducts from "@/partials/FeaturedProducts";
@@ -39,7 +39,6 @@ const ShowProductSingle = async ({ params }: { params: { slug: string } }) => {
   const paymentsAndDelivery = getListPage("sections/payments-and-delivery.md");
   const { estimated_delivery } = paymentsAndDelivery.frontmatter;
 
-  const { currencySymbol } = config.shopify;
   const product = await getProduct(params.slug);
 
   if (!product) return notFound();
@@ -77,16 +76,19 @@ const ShowProductSingle = async ({ params }: { params: { slug: string } }) => {
               <h1 className="text-3xl md:h2 mb-2 md:mb-6">{title}</h1>
 
               <div className="flex gap-2 items-center">
-                <h4 className="text-text-light dark:text-darkmode-text-light max-md:h2">
-                  {currencySymbol} {priceRange?.minVariantPrice.amount}{" "}
-                  {priceRange?.minVariantPrice?.currencyCode}
-                </h4>
+                <Price
+                  className="text-text-light dark:text-darkmode-text-light max-md:h2"
+                  amount={priceRange?.minVariantPrice.amount}
+                  currencyCode={priceRange?.minVariantPrice?.currencyCode}
+                />
                 {parseFloat(compareAtPriceRange?.maxVariantPrice.amount) > 0 ? (
-                  <s className="text-text-light max-md:h3 dark:text-darkmode-text-light">
-                    {currencySymbol}{" "}
-                    {compareAtPriceRange?.maxVariantPrice?.amount}{" "}
-                    {compareAtPriceRange?.maxVariantPrice?.currencyCode}
-                  </s>
+                  <Price
+                    className="text-text-light max-md:h3 dark:text-darkmode-text-light line-through"
+                    amount={compareAtPriceRange?.maxVariantPrice?.amount}
+                    currencyCode={
+                      compareAtPriceRange?.maxVariantPrice?.currencyCode
+                    }
+                  />
                 ) : (
                   ""
                 )}

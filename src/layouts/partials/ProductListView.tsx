@@ -2,7 +2,7 @@
 
 import { AddToCart } from "@/components/cart/AddToCart";
 import SkeletonCards from "@/components/loadings/skeleton/SkeletonCards";
-import config from "@/config/config.json";
+import Price from "@/components/Price";
 import ImageFallback from "@/helpers/ImageFallback";
 import useLoadMore from "@/hooks/useLoadMore";
 import { defaultSort, sorting } from "@/lib/constants";
@@ -14,7 +14,6 @@ import { Suspense, useEffect, useRef, useState } from "react";
 import { BiLoaderAlt } from "react-icons/bi";
 
 const ProductListView = ({ searchParams }: { searchParams: any }) => {
-  const { currencySymbol } = config.shopify;
   const [isLoading, setIsLoading] = useState(true);
   const targetElementRef = useRef<HTMLDivElement>(null);
   const [data, setData] = useState<{
@@ -260,18 +259,21 @@ const ProductListView = ({ searchParams }: { searchParams: any }) => {
                     </h2>
 
                     <div className="flex items-center gap-x-2 mt-2">
-                      <span className="text-text-light dark:text-darkmode-text-light text-xs md:text-lg font-bold">
-                        ৳ {priceRange?.minVariantPrice?.amount}{" "}
-                        {priceRange?.minVariantPrice?.currencyCode}
-                      </span>
+                      <Price
+                        className="text-text-light dark:text-darkmode-text-light text-xs md:text-lg font-bold"
+                        amount={priceRange?.minVariantPrice?.amount}
+                        currencyCode={priceRange?.minVariantPrice?.currencyCode}
+                      />
                       {parseFloat(
                         compareAtPriceRange?.maxVariantPrice?.amount,
                       ) > 0 ? (
-                        <s className="text-text-light dark:text-darkmode-text-light text-xs md:text-base font-medium">
-                          {currencySymbol}{" "}
-                          {compareAtPriceRange?.maxVariantPrice?.amount}{" "}
-                          {compareAtPriceRange?.maxVariantPrice?.currencyCode}
-                        </s>
+                        <Price
+                          className="text-text-light dark:text-darkmode-text-light text-xs md:text-base font-medium line-through"
+                          amount={compareAtPriceRange?.maxVariantPrice?.amount}
+                          currencyCode={
+                            compareAtPriceRange?.maxVariantPrice?.currencyCode
+                          }
+                        />
                       ) : (
                         ""
                       )}

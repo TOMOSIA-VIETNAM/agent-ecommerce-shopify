@@ -11,8 +11,14 @@ const RangeSlider = ({
 }: {
   maxPriceData: { amount: string; currencyCode: string };
 }) => {
-  const { currencyCode, currencySymbol } = config.shopify;
+  const { currencyCode } = config.shopify;
   const maxAmount = parseInt(maxPriceData?.amount);
+  const formatPrice = (value: number) =>
+    new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: maxPriceData?.currencyCode || currencyCode,
+      currencyDisplay: "narrowSymbol",
+    }).format(value);
 
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -109,14 +115,8 @@ const RangeSlider = ({
   return (
     <div className="range-slider-container">
       <div className="flex justify-between">
-        <p>
-          {currencySymbol}
-          {minValue} {maxPriceData?.currencyCode || currencyCode}
-        </p>
-        <p>
-          {currencySymbol}
-          {maxValue} {maxPriceData?.currencyCode || currencyCode}
-        </p>
+        <p>{formatPrice(minValue)}</p>
+        <p>{formatPrice(maxValue)}</p>
       </div>
 
       <div className="range-slider" ref={rangeRef}>
