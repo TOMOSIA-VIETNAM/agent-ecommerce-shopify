@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { useAssistantFrame } from "../frame";
 import { CheckoutPayload, formatMoney } from "../protocol";
+import { CHECKOUT_COMPLETE_KEY, CHECKOUT_PENDING_KEY } from "../checkoutHandoff";
 import CardFrame from "./CardFrame";
 
 /**
@@ -12,12 +13,13 @@ import CardFrame from "./CardFrame";
  * hosted checkout for this cart — a URL the backend attached to the payload after the
  * model's call, so the model never supplied or saw it. Only https links are followed.
  *
- * Checkout opens in a popup rather than a tab so the chat stays put: Shopify's hosted
- * checkout has no callback of its own, so the storefront's homepage (where its
- * `theme.liquid` bounces the customer back to) posts a message back to this popup's
- * opener and closes itself (`CheckoutPopupHandoff`). Once that arrives, this asks the
- * question a shopper would ask next — through the same chat turn as everything else,
- * so the order-status card that comes back is a real tool call, not a side channel.
+ * Checkout opens in a popup so the chat stays put: Shopify's hosted checkout has no
+ * callback of its own, so the storefront's homepage (where its `theme.liquid` bounces
+ * the customer back to) is what signals completion, over `localStorage` rather than
+ * `window.opener` + `postMessage` (see CheckoutPopupHandoff for why). Once that
+ * arrives, this asks the question a shopper would ask next — through the same chat
+ * turn as everything else, so the order-status card that comes back is a real tool
+ * call, not a side channel.
  */
 export default function CheckoutCard({
   payload,
@@ -32,29 +34,28 @@ export default function CheckoutCard({
   );
 
   useEffect(() => {
-    function onMessage(event: MessageEvent) {
-      if (event.origin !== window.location.origin) return;
-      if (event.data?.type !== "checkout-complete") return;
+    function onStorage(event: StorageEvent) {
+      if (event.key !== CHECKOUT_COMPLETE_KEY || !event.newValue) return;
+      localStorage.removeItem(CHECKOUT_COMPLETE_KEY);
       popupRef.current?.close();
       popupRef.current = null;
       ask("I just finished checking out — what's the status of my order?");
     }
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, [ask]);
 
   if (!cart?.items?.length) return null;
 
   const startCheckout = (url: string) => {
-    // Chrome only renders a chrome-less popup window when the "popup" feature
-    // token is present — width/height alone now just open a regular tab.
+    localStorage.setItem(CHECKOUT_PENDING_KEY, String(Date.now()));
     const popup = window.open(
       url,
-      "shopify-checkout",
+      `shopify-checkout-${Date.now()}`,
       "popup=yes,width=520,height=760",
     );
     if (!popup) {
-      window.location.href = url; // popup blocked — fall back to a plain navigation
+      window.open(url, "_blank");
       return;
     }
     popupRef.current = popup;
@@ -91,16 +92,13 @@ export default function CheckoutCard({
         </p>
       )}
       {handoff ? (
-        <a
-          href={handoff.url}
-          onClick={(e) => {
-            e.preventDefault();
-            startCheckout(handoff.url);
-          }}
+        <button
+          type="button"
+          onClick={() => startCheckout(handoff.url)}
           className="btn btn-primary mt-3 block w-full text-center text-base"
         >
           {handoff.label ?? "Check out"}
-        </a>
+        </button>
       ) : (
         <p className="mt-3 px-1 text-sm text-text-light dark:text-darkmode-text-light">
           Open the cart to finish checking out.
