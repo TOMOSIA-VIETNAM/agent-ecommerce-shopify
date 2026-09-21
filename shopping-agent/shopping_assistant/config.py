@@ -6,6 +6,8 @@ written as "the package's default plus ours".
 
 from __future__ import annotations
 
+import os
+
 from shopping_agent import ShoppingAgentConfig
 
 from .env import require_env
@@ -32,6 +34,14 @@ EXTRA_POLICY_TERMS = ("installation", "assembly", "voltage", "safety", "certific
 
 def build_config() -> ShoppingAgentConfig:
     return ShoppingAgentConfig(
+        # Overridable to route the turn loop through a different model/provider behind
+        # an Anthropic-Messages-API-compatible endpoint (ANTHROPIC_BASE_URL) — e.g.
+        # OpenRouter's Anthropic Skin serving a Gemini model. memory_model needs the
+        # same override: it defaults to a bare Anthropic model id ("claude-haiku-4-5-...")
+        # that OpenRouter still resolves (to real Anthropic Haiku), so without this the
+        # memory extraction call silently runs on a different provider than the chat turn.
+        model=os.environ.get("AGENT_MODEL") or _DEFAULTS.model,
+        memory_model=os.environ.get("AGENT_MEMORY_MODEL") or _DEFAULTS.memory_model,
         brand_name=require_env("STORE_NAME"),
         assistant_name=require_env("ASSISTANT_NAME"),
         brand_voice="warm, concise, and plain about trade-offs",
