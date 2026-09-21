@@ -1,6 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { MERCHANT_AUTH_COOKIE } from "@/lib/constants";
 
+function checkBasicAuth(request: NextRequest): NextResponse | null {
+  const user = process.env.BASIC_AUTH_USER;
+  const pass = process.env.BASIC_AUTH_PASSWORD;
+  if (!user || !pass) return null;
+
+  const header = request.headers.get("authorization");
+  if (header?.startsWith("Basic ")) {
+    const [reqUser, reqPass] = atob(header.slice(6)).split(":");
+    if (reqUser === user && reqPass === pass) return null;
+  }
+
+  return new NextResponse("Authentication required", {
+    status: 401,
+    headers: { "WWW-Authenticate": 'Basic realm="Restricted"' },
+  });
+}
+
 // Fast, cookie-presence-only reject. This is NOT the real gate — it never
 // touches the database (Edge runtime can't reach Prisma) — the actual
 // session validity check lives in
@@ -9,10 +26,6 @@ function isSafeNextPath(value: string): boolean {
   return value.startsWith("/") && !value.startsWith("//");
 }
 
-// The login form must be reachable with no cookie at all (that's the whole
-// point), and logout must always be callable regardless of cookie state —
-// both live under /merchant so the cookie's path=/merchant scope reaches
-// them (see MERCHANT_AUTH_COOKIE_OPTIONS in src/lib/constants.ts).
 const PUBLIC_PATHS = new Set([
   "/merchant/login",
   "/merchant/api/login",
@@ -20,7 +33,14 @@ const PUBLIC_PATHS = new Set([
 ]);
 
 export function middleware(request: NextRequest) {
+  const basicAuthResponse = checkBasicAuth(request);
+  if (basicAuthResponse) return basicAuthResponse;
+
   const { pathname, search } = request.nextUrl;
+
+  if (!pathname.startsWith("/merchant")) {
+    return NextResponse.next();
+  }
 
   if (PUBLIC_PATHS.has(pathname)) {
     return NextResponse.next();
@@ -39,5 +59,5 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/merchant/:path*"],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|api/revalidate|api/internal).*)"],
 };
