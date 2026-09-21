@@ -7,13 +7,21 @@ fixture-backed — see ``backend.py`` and the decision record in ../CLAUDE.md fo
 
 from __future__ import annotations
 
+import os
+
 from merchant_agent import MerchantAgentConfig
 
 from .env import require_env
 
+_DEFAULTS = MerchantAgentConfig()
+
 
 def build_config() -> MerchantAgentConfig:
     return MerchantAgentConfig(
+        # Overridable to route the turn loop through a different model/provider behind
+        # an Anthropic-Messages-API-compatible endpoint (ANTHROPIC_BASE_URL) — e.g.
+        # OpenRouter's Anthropic Skin serving a Gemini model.
+        model=os.environ.get("AGENT_MODEL") or _DEFAULTS.model,
         brand_name=require_env("STORE_NAME"),
         assistant_name=require_env("MERCHANT_ASSISTANT_NAME"),
         brand_voice="plain and specific, numbers first",
